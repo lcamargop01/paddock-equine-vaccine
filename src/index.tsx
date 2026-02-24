@@ -659,14 +659,14 @@ function getHTML() {
               </div>
             </th>
             \${filteredTypes.map(t => \`
-              <th class="px-2 py-2.5 text-center font-medium">
+              <th class="bg-pe-dark px-2 py-2.5 text-center font-medium">
                 <div class="flex flex-col items-center gap-0.5">
                   <span class="badge \${categoryColor(t.category)} text-white">\${t.category.slice(0,3).toUpperCase()}</span>
                   <span class="text-[10px] leading-tight">\${t.name}</span>
                 </div>
               </th>
             \`).join('')}
-            <th class="px-2 py-2.5 text-center font-medium min-w-[60px]">
+            <th class="bg-pe-dark px-2 py-2.5 text-center font-medium min-w-[60px]">
               <i class="fas fa-sticky-note text-xs"></i>
             </th>
           </tr>
