@@ -13,7 +13,13 @@ app.use('/api/*', cors())
 
 app.get('/api/owners', async (c) => {
   const db = c.env.DB
-  const owners = await db.prepare('SELECT * FROM owners ORDER BY name').all()
+  const owners = await db.prepare(`
+    SELECT o.*, COUNT(h.id) as horse_count
+    FROM owners o
+    LEFT JOIN horses h ON h.owner_id = o.id AND h.active = 1
+    GROUP BY o.id
+    ORDER BY o.name
+  `).all()
   return c.json(owners.results)
 })
 
@@ -34,15 +40,30 @@ app.post('/api/owners', async (c) => {
 app.put('/api/owners/:id', async (c) => {
   const db = c.env.DB
   const id = c.req.param('id')
-  const { name, contact, notes } = await c.req.json()
-  await db.prepare('UPDATE owners SET name=COALESCE(?,name), contact=COALESCE(?,contact), notes=COALESCE(?,notes) WHERE id=?')
-    .bind(name || null, contact || null, notes || null, id).run()
+  const body = await c.req.json()
+  
+  const fields: string[] = []
+  const params: any[] = []
+  
+  if ('name' in body && body.name) { fields.push('name=?'); params.push(body.name) }
+  if ('contact' in body) { fields.push('contact=?'); params.push(body.contact || null) }
+  if ('notes' in body) { fields.push('notes=?'); params.push(body.notes || null) }
+  
+  if (fields.length === 0) return c.json({ error: 'No fields to update' }, 400)
+  
+  params.push(id)
+  await db.prepare(`UPDATE owners SET ${fields.join(', ')} WHERE id=?`).bind(...params).run()
   return c.json({ success: true })
 })
 
 app.delete('/api/owners/:id', async (c) => {
   const db = c.env.DB
   const id = c.req.param('id')
+  // Check if owner has horses
+  const count = await db.prepare('SELECT COUNT(*) as cnt FROM horses WHERE owner_id=? AND active=1').bind(id).first() as any
+  if (count?.cnt > 0) {
+    return c.json({ error: `Cannot delete: owner has ${count.cnt} active horse(s)` }, 400)
+  }
   await db.prepare('DELETE FROM owners WHERE id=?').bind(id).run()
   return c.json({ success: true })
 })
@@ -124,23 +145,19 @@ app.post('/api/horses', async (c) => {
 app.put('/api/horses/:id', async (c) => {
   const db = c.env.DB
   const id = c.req.param('id')
-  const { name, barn_name, owner_id, notes, active } = await c.req.json()
+  const body = await c.req.json()
 
-  await db.prepare(`
-    UPDATE horses SET 
-      name=COALESCE(?,name), 
-      barn_name=COALESCE(?,barn_name), 
-      owner_id=COALESCE(?,owner_id), 
-      notes=COALESCE(?,notes),
-      active=COALESCE(?,active),
-      updated_at=CURRENT_TIMESTAMP 
-    WHERE id=?
-  `).bind(
-    name || null, barn_name || null, owner_id || null,
-    notes !== undefined ? notes : null,
-    active !== undefined ? active : null, id
-  ).run()
+  const fields: string[] = ['updated_at=CURRENT_TIMESTAMP']
+  const params: any[] = []
 
+  if ('name' in body && body.name) { fields.push('name=?'); params.push(body.name) }
+  if ('barn_name' in body) { fields.push('barn_name=?'); params.push(body.barn_name || null) }
+  if ('owner_id' in body && body.owner_id) { fields.push('owner_id=?'); params.push(body.owner_id) }
+  if ('notes' in body) { fields.push('notes=?'); params.push(body.notes || null) }
+  if ('active' in body) { fields.push('active=?'); params.push(body.active) }
+
+  params.push(id)
+  await db.prepare(`UPDATE horses SET ${fields.join(', ')} WHERE id=?`).bind(...params).run()
   return c.json({ success: true })
 })
 
@@ -500,6 +517,11 @@ function getHTML() {
     }
   }
 
+  function escHTML(str) {
+    if (!str) return '';
+    return String(str).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+  }
+
   function showToast(msg, type = 'success') {
     const colors = { success: 'bg-pe-green', error: 'bg-red-600', info: 'bg-pe-accent' };
     const el = document.createElement('div');
@@ -685,7 +707,9 @@ function getHTML() {
   function renderModal() {
     if (state.modal === 'datePicker') return renderDatePickerModal();
     if (state.modal === 'addHorse') return renderAddHorseModal();
+    if (state.modal === 'editHorse') return renderEditHorseModal();
     if (state.modal === 'horseDetail') return renderHorseDetailModal();
+    if (state.modal === 'editOwner') return renderEditOwnerModal();
     if (state.modal === 'settings') return renderSettingsModal();
     return '';
   }
@@ -791,6 +815,106 @@ function getHTML() {
     </div>\`;
   }
 
+  function renderEditHorseModal() {
+    const d = state.modalData;
+    if (!d) return '';
+
+    return \`
+    <div class="modal-overlay fixed inset-0 bg-black/50 z-[100] flex items-end sm:items-center justify-center" onclick="closeModalBg(event)">
+      <div class="modal-content bg-white rounded-t-2xl sm:rounded-2xl w-full sm:max-w-sm max-h-[85vh] overflow-y-auto p-5 pb-8">
+        <div class="flex items-center justify-between mb-4">
+          <div class="font-bold text-pe-darker text-lg">Edit Horse</div>
+          <button onclick="closeModal()" class="p-2 hover:bg-gray-100 rounded-full">
+            <i class="fas fa-times text-gray-400"></i>
+          </button>
+        </div>
+        
+        <div class="space-y-3">
+          <div>
+            <label class="text-xs font-semibold text-gray-600 mb-1 block">Registered Name *</label>
+            <input type="text" id="editHorseName" value="\${escHTML(d.name)}" 
+              class="w-full px-3 py-2.5 border-2 border-gray-200 rounded-xl text-sm focus:border-pe-green outline-none" />
+          </div>
+          <div>
+            <label class="text-xs font-semibold text-gray-600 mb-1 block">Barn Name</label>
+            <input type="text" id="editHorseBarn" value="\${escHTML(d.barn_name || '')}" 
+              class="w-full px-3 py-2.5 border-2 border-gray-200 rounded-xl text-sm focus:border-pe-green outline-none" />
+          </div>
+          <div>
+            <label class="text-xs font-semibold text-gray-600 mb-1 block">Owner *</label>
+            <select id="editHorseOwner" class="w-full px-3 py-2.5 border-2 border-gray-200 rounded-xl text-sm focus:border-pe-green outline-none">
+              \${state.owners.map(o => \`<option value="\${o.id}" \${o.id === d.owner_id ? 'selected' : ''}>\${o.name}</option>\`).join('')}
+            </select>
+          </div>
+          <div>
+            <label class="text-xs font-semibold text-gray-600 mb-1 block">Notes</label>
+            <textarea id="editHorseNotes" rows="3" placeholder="Optional notes..."
+              class="w-full px-3 py-2.5 border-2 border-gray-200 rounded-xl text-sm focus:border-pe-green outline-none resize-none">\${escHTML(d.notes || '')}</textarea>
+          </div>
+          
+          <button onclick="saveEditHorse()" class="w-full bg-pe-green text-white py-3 rounded-xl text-sm font-bold hover:bg-pe-green-dark transition-colors">
+            <i class="fas fa-save mr-1"></i> Save Changes
+          </button>
+
+          <div class="pt-2 border-t border-gray-100">
+            <button onclick="deactivateHorse(\${d.id})" class="w-full text-amber-600 text-xs py-2 hover:bg-amber-50 rounded-lg transition-colors flex items-center justify-center gap-1">
+              <i class="fas fa-eye-slash"></i> Deactivate Horse
+            </button>
+            <button onclick="deleteHorse(\${d.id})" class="w-full text-red-500 text-xs py-2 hover:bg-red-50 rounded-lg transition-colors flex items-center justify-center gap-1">
+              <i class="fas fa-trash-alt"></i> Delete Horse Permanently
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>\`;
+  }
+
+  function renderEditOwnerModal() {
+    const d = state.modalData;
+    if (!d) return '';
+
+    return \`
+    <div class="modal-overlay fixed inset-0 bg-black/50 z-[100] flex items-end sm:items-center justify-center" onclick="closeModalBg(event)">
+      <div class="modal-content bg-white rounded-t-2xl sm:rounded-2xl w-full sm:max-w-sm p-5 pb-8">
+        <div class="flex items-center justify-between mb-4">
+          <div class="font-bold text-pe-darker text-lg">Edit Owner</div>
+          <button onclick="closeModal()" class="p-2 hover:bg-gray-100 rounded-full">
+            <i class="fas fa-times text-gray-400"></i>
+          </button>
+        </div>
+        
+        <div class="space-y-3">
+          <div>
+            <label class="text-xs font-semibold text-gray-600 mb-1 block">Owner Name *</label>
+            <input type="text" id="editOwnerName" value="\${escHTML(d.name)}" 
+              class="w-full px-3 py-2.5 border-2 border-gray-200 rounded-xl text-sm focus:border-pe-green outline-none" />
+          </div>
+          <div>
+            <label class="text-xs font-semibold text-gray-600 mb-1 block">Contact (phone/email)</label>
+            <input type="text" id="editOwnerContact" value="\${escHTML(d.contact || '')}" placeholder="e.g. 555-1234 or email@example.com"
+              class="w-full px-3 py-2.5 border-2 border-gray-200 rounded-xl text-sm focus:border-pe-green outline-none" />
+          </div>
+          <div>
+            <label class="text-xs font-semibold text-gray-600 mb-1 block">Notes</label>
+            <textarea id="editOwnerNotes" rows="2" placeholder="Optional notes..."
+              class="w-full px-3 py-2.5 border-2 border-gray-200 rounded-xl text-sm focus:border-pe-green outline-none resize-none">\${escHTML(d.notes || '')}</textarea>
+          </div>
+          
+          <button onclick="saveEditOwner()" class="w-full bg-pe-green text-white py-3 rounded-xl text-sm font-bold hover:bg-pe-green-dark transition-colors">
+            <i class="fas fa-save mr-1"></i> Save Changes
+          </button>
+
+          <div class="pt-2 border-t border-gray-100">
+            <button onclick="deleteOwner(\${d.id})" class="w-full text-red-500 text-xs py-2 hover:bg-red-50 rounded-lg transition-colors flex items-center justify-center gap-1">
+              <i class="fas fa-trash-alt"></i> Delete Owner
+            </button>
+            <div class="text-[10px] text-gray-400 text-center mt-1">Owner can only be deleted if they have no horses.</div>
+          </div>
+        </div>
+      </div>
+    </div>\`;
+  }
+
   function renderHorseDetailModal() {
     const horse = state.selectedHorse;
     if (!horse) return '';
@@ -813,7 +937,7 @@ function getHTML() {
             <div class="text-xs text-gray-400 mt-0.5"><i class="fas fa-user-circle mr-1"></i>\${horse.owner_name}</div>
           </div>
           <div class="flex items-center gap-1">
-            <button onclick="editHorse(\${horse.id})" class="p-2 hover:bg-gray-100 rounded-full text-pe-accent" title="Edit">
+            <button onclick="openEditHorseModal(\${horse.id})" class="p-2 hover:bg-gray-100 rounded-full text-pe-accent" title="Edit Horse">
               <i class="fas fa-pen text-sm"></i>
             </button>
             <button onclick="closeModal()" class="p-2 hover:bg-gray-100 rounded-full">
@@ -895,9 +1019,16 @@ function getHTML() {
             <div class="text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">Owners</div>
             <div class="space-y-1">
               \${state.owners.map(o => \`
-                <div class="flex items-center justify-between px-3 py-2 bg-gray-50 rounded-lg">
-                  <span class="text-sm font-medium">\${o.name}</span>
-                  <span class="text-xs text-gray-400">\${o.contact || ''}</span>
+                <div class="flex items-center justify-between px-3 py-2.5 bg-gray-50 rounded-lg cursor-pointer hover:bg-gray-100 active:bg-gray-200 transition-colors" onclick="openEditOwnerModal(\${o.id})">
+                  <div>
+                    <div class="text-sm font-medium">\${o.name}</div>
+                    \${o.contact ? '<div class="text-[10px] text-gray-400">' + escHTML(o.contact) + '</div>' : ''}
+                    \${o.notes ? '<div class="text-[10px] text-gray-400 italic">' + escHTML(o.notes) + '</div>' : ''}
+                  </div>
+                  <div class="flex items-center gap-2">
+                    <span class="text-[10px] text-gray-400">\${o.horse_count || 0} horse\${(o.horse_count || 0) !== 1 ? 's' : ''}</span>
+                    <i class="fas fa-chevron-right text-gray-300 text-xs"></i>
+                  </div>
                 </div>
               \`).join('')}
             </div>
@@ -1069,23 +1200,84 @@ function getHTML() {
     render();
   }
 
-  async function editHorse(id) {
+  function openEditHorseModal(id) {
     const horse = state.selectedHorse || state.horses.find(h => h.id === id);
-    const newName = prompt('Registered Name:', horse.name);
-    if (newName === null) return;
-    const newBarn = prompt('Barn Name:', horse.barn_name || '');
-    if (newBarn === null) return;
-    const newNotes = prompt('Notes:', horse.notes || '');
-    if (newNotes === null) return;
+    if (!horse) return;
+    state.modal = 'editHorse';
+    state.modalData = { id: horse.id, name: horse.name, barn_name: horse.barn_name, owner_id: horse.owner_id, notes: horse.notes };
+    render();
+  }
 
-    await api.put('/api/horses/' + id, { 
-      name: newName || horse.name, 
-      barn_name: newBarn, 
-      notes: newNotes 
-    });
+  async function saveEditHorse() {
+    const d = state.modalData;
+    const name = document.getElementById('editHorseName').value.trim();
+    const barn_name = document.getElementById('editHorseBarn').value.trim();
+    const owner_id = parseInt(document.getElementById('editHorseOwner').value);
+    const notes = document.getElementById('editHorseNotes').value.trim();
+
+    if (!name) { showToast('Name is required', 'error'); return; }
+
+    await api.put('/api/horses/' + d.id, { name, barn_name, owner_id, notes });
     showToast('Horse updated!');
     closeModal();
-    loadGrid();
+    await loadGrid();
+  }
+
+  async function deactivateHorse(id) {
+    if (!confirm('Deactivate this horse? It will be hidden from the grid but not deleted.')) return;
+    await api.put('/api/horses/' + id, { active: 0 });
+    showToast('Horse deactivated', 'info');
+    closeModal();
+    await loadGrid();
+  }
+
+  async function deleteHorse(id) {
+    if (!confirm('Permanently delete this horse and all its treatment records? This cannot be undone.')) return;
+    await api.del('/api/horses/' + id);
+    showToast('Horse deleted', 'info');
+    closeModal();
+    await loadGrid();
+  }
+
+  function openEditOwnerModal(id) {
+    const owner = state.owners.find(o => o.id === id);
+    if (!owner) return;
+    state.modal = 'editOwner';
+    state.modalData = { id: owner.id, name: owner.name, contact: owner.contact, notes: owner.notes };
+    render();
+  }
+
+  async function saveEditOwner() {
+    const d = state.modalData;
+    const name = document.getElementById('editOwnerName').value.trim();
+    const contact = document.getElementById('editOwnerContact').value.trim();
+    const notes = document.getElementById('editOwnerNotes').value.trim();
+
+    if (!name) { showToast('Name is required', 'error'); return; }
+
+    await api.put('/api/owners/' + d.id, { name, contact, notes });
+    showToast('Owner updated!');
+    await loadOwners();
+    state.modal = 'settings';
+    state.modalData = null;
+    await loadGrid();
+    render();
+  }
+
+  async function deleteOwner(id) {
+    const ownerHorses = state.horses.filter(h => h.owner_id === id);
+    if (ownerHorses.length > 0) {
+      showToast('Cannot delete: owner still has ' + ownerHorses.length + ' horse(s)', 'error');
+      return;
+    }
+    if (!confirm('Delete this owner permanently?')) return;
+    await api.del('/api/owners/' + id);
+    showToast('Owner deleted', 'info');
+    await loadOwners();
+    state.modal = 'settings';
+    state.modalData = null;
+    await loadGrid();
+    render();
   }
 
   // Settings
