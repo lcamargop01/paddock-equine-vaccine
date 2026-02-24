@@ -369,12 +369,16 @@ function getHTML() {
   </script>
   <style>
     @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
-    * { font-family: 'Inter', system-ui, sans-serif; -webkit-tap-highlight-color: transparent; }
-    body { overscroll-behavior: none; }
-    .grid-table { overflow-x: auto; -webkit-overflow-scrolling: touch; }
-    .grid-table table { border-collapse: separate; border-spacing: 0; }
-    .grid-table th, .grid-table td { white-space: nowrap; }
+    * { font-family: 'Inter', system-ui, sans-serif; -webkit-tap-highlight-color: transparent; box-sizing: border-box; }
+    html, body { margin: 0; padding: 0; height: 100%; overscroll-behavior: none; }
+    #app { display: flex; flex-direction: column; height: 100vh; height: 100dvh; overflow: hidden; }
+    .app-header, .app-filters { flex-shrink: 0; }
+    .grid-wrapper { flex: 1; overflow: auto; -webkit-overflow-scrolling: touch; position: relative; }
+    .grid-wrapper table { border-collapse: separate; border-spacing: 0; }
+    .grid-wrapper th, .grid-wrapper td { white-space: nowrap; }
     .sticky-col { position: sticky; left: 0; z-index: 10; }
+    thead th { position: sticky; top: 0; z-index: 20; }
+    thead th.sticky-col { z-index: 30; }
     .date-cell { min-width: 90px; cursor: pointer; transition: all 0.15s; }
     .date-cell:hover { background-color: #E8EDF1 !important; }
     .date-cell:active { transform: scale(0.97); }
@@ -400,7 +404,7 @@ function getHTML() {
     @keyframes fadeOut { from { opacity: 1; } to { opacity: 0; } }
   </style>
 </head>
-<body class="bg-gray-100 min-h-screen">
+<body class="bg-gray-100">
   <div id="app"></div>
 
   <script>
@@ -531,16 +535,38 @@ function getHTML() {
     setTimeout(() => el.remove(), 3000);
   }
 
+  // ==================== SCROLL POSITION ====================
+  let savedScrollX = 0;
+  let savedScrollY = 0;
+
+  function saveScrollPos() {
+    const gridEl = document.querySelector('.grid-wrapper');
+    if (gridEl) {
+      savedScrollX = gridEl.scrollLeft;
+      savedScrollY = gridEl.scrollTop;
+    }
+  }
+
+  function restoreScrollPos() {
+    const gridEl = document.querySelector('.grid-wrapper');
+    if (gridEl) {
+      gridEl.scrollLeft = savedScrollX;
+      gridEl.scrollTop = savedScrollY;
+    }
+  }
+
   // ==================== RENDERING ====================
   function render() {
+    saveScrollPos();
     const app = document.getElementById('app');
     app.innerHTML = renderHeader() + renderFilters() + renderContent() + (state.modal ? renderModal() : '');
     attachEventListeners();
+    requestAnimationFrame(restoreScrollPos);
   }
 
   function renderHeader() {
     return \`
-    <header class="bg-pe-slate text-white shadow-lg sticky top-0 z-50">
+    <header class="app-header bg-pe-slate text-white shadow-lg z-50">
       <div class="flex items-center justify-between px-3 py-2">
         <div class="flex items-center gap-2">
           <div class="w-8 h-8 bg-pe-green rounded-full flex items-center justify-center">
@@ -574,7 +600,7 @@ function getHTML() {
     ];
 
     return \`
-    <div class="bg-white shadow-sm border-b">
+    <div class="app-filters bg-white shadow-sm border-b">
       <div class="px-3 py-2">
         <div class="relative">
           <i class="fas fa-search absolute left-3 top-1/2 -translate-y-1/2 text-gray-400 text-sm"></i>
@@ -612,17 +638,17 @@ function getHTML() {
 
   function renderContent() {
     if (state.loading) {
-      return '<div class="flex items-center justify-center p-12"><i class="fas fa-spinner fa-spin text-3xl text-pe-green"></i></div>';
+      return '<div class="grid-wrapper flex items-center justify-center"><i class="fas fa-spinner fa-spin text-3xl text-pe-green"></i></div>';
     }
 
     if (state.horses.length === 0) {
-      return '<div class="text-center p-12 text-gray-400"><i class="fas fa-horse text-4xl mb-3"></i><p class="text-sm">No horses found</p></div>';
+      return '<div class="grid-wrapper flex items-center justify-center text-gray-400"><div class="text-center"><i class="fas fa-horse text-4xl mb-3"></i><p class="text-sm">No horses found</p></div></div>';
     }
 
     const filteredTypes = state.types;
     
     return \`
-    <div class="grid-table pb-20">
+    <div class="grid-wrapper">
       <table class="w-full text-xs">
         <thead>
           <tr class="bg-pe-dark text-white">
@@ -647,6 +673,7 @@ function getHTML() {
         </thead>
         <tbody>
           \${renderRows(filteredTypes)}
+          <tr><td colspan="\${filteredTypes.length + 2}" style="height:80px"></td></tr>
         </tbody>
       </table>
     </div>\`;
