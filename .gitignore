@@ -1,0 +1,9 @@
+node_modules/
+.wrangler/
+dist/
+.env
+.dev.vars
+*.log
+.pm2/
+pids/
+logs/
