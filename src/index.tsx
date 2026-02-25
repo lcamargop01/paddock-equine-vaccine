@@ -21,10 +21,11 @@ function generateToken() {
 async function getSession(db: D1Database, token: string) {
   if (!token) return null
   const session = await db.prepare(
-    `SELECT s.*, CASE WHEN s.role='vet' THEN v.name WHEN s.role='stable' THEN st.name END as user_name
+    `SELECT s.*, CASE WHEN s.role='vet' THEN v.name WHEN s.role='stable' THEN st.name WHEN s.role='admin' THEN a.name END as user_name
      FROM sessions s
      LEFT JOIN vets v ON s.role='vet' AND s.ref_id = v.id
      LEFT JOIN stables st ON s.role='stable' AND s.ref_id = st.id
+     LEFT JOIN admins a ON s.role='admin' AND s.ref_id = a.id
      WHERE s.token=? AND s.expires_at > datetime('now')`
   ).bind(token).first()
   return session
@@ -37,7 +38,8 @@ app.get('/api/auth/options', async (c) => {
   const db = c.env.DB
   const stables = await db.prepare('SELECT id, name FROM stables WHERE active=1 ORDER BY name').all()
   const vets = await db.prepare('SELECT id, name FROM vets WHERE active=1 ORDER BY name').all()
-  return c.json({ stables: stables.results, vets: vets.results })
+  const admins = await db.prepare('SELECT id, name FROM admins WHERE active=1 ORDER BY name').all()
+  return c.json({ stables: stables.results, vets: vets.results, admins: admins.results })
 })
 
 // Login
@@ -52,6 +54,8 @@ app.post('/api/auth/login', async (c) => {
     user = await db.prepare('SELECT * FROM vets WHERE id=? AND active=1').bind(id).first()
   } else if (role === 'stable') {
     user = await db.prepare('SELECT * FROM stables WHERE id=? AND active=1').bind(id).first()
+  } else if (role === 'admin') {
+    user = await db.prepare('SELECT * FROM admins WHERE id=? AND active=1').bind(id).first()
   }
 
   if (!user) return c.json({ error: 'User not found' }, 404)
@@ -79,6 +83,30 @@ app.get('/api/auth/me', async (c) => {
   return c.json({ role: session.role, id: session.ref_id, name: session.user_name })
 })
 
+// Change PIN
+app.post('/api/auth/change-pin', async (c) => {
+  const db = c.env.DB
+  const token = c.req.header('Authorization')?.replace('Bearer ', '')
+  if (!token) return c.json({ error: 'Not authenticated' }, 401)
+  const session = await getSession(db, token)
+  if (!session) return c.json({ error: 'Invalid session' }, 401)
+
+  const { current_pin, new_pin } = await c.req.json()
+  if (!current_pin || !new_pin) return c.json({ error: 'Current PIN and new PIN are required' }, 400)
+  if (new_pin.length < 4) return c.json({ error: 'PIN must be at least 4 characters' }, 400)
+
+  const role = session.role as string
+  const refId = session.ref_id
+  const table = role === 'vet' ? 'vets' : role === 'stable' ? 'stables' : 'admins'
+
+  const user = await db.prepare(`SELECT pin FROM ${table} WHERE id=?`).bind(refId).first() as any
+  if (!user) return c.json({ error: 'User not found' }, 404)
+  if (user.pin !== current_pin) return c.json({ error: 'Current PIN is incorrect' }, 401)
+
+  await db.prepare(`UPDATE ${table} SET pin=? WHERE id=?`).bind(new_pin, refId).run()
+  return c.json({ success: true })
+})
+
 // Logout
 app.post('/api/auth/logout', async (c) => {
   const db = c.env.DB
@@ -86,6 +114,40 @@ app.post('/api/auth/logout', async (c) => {
   if (token) {
     await db.prepare('DELETE FROM sessions WHERE token=?').bind(token).run()
   }
+  return c.json({ success: true })
+})
+
+// ==================== ADMINS API ====================
+
+app.get('/api/admins', async (c) => {
+  const db = c.env.DB
+  const admins = await db.prepare('SELECT id, name, email, pin, active, created_at FROM admins WHERE active=1 ORDER BY name').all()
+  return c.json(admins.results)
+})
+
+app.post('/api/admins', async (c) => {
+  const db = c.env.DB
+  const { name, email, pin } = await c.req.json()
+  if (!name) return c.json({ error: 'Name is required' }, 400)
+  const result = await db.prepare(
+    'INSERT INTO admins (name, email, pin) VALUES (?, ?, ?)'
+  ).bind(name, email || null, pin || '0000').run()
+  return c.json({ id: result.meta.last_row_id, name }, 201)
+})
+
+app.put('/api/admins/:id', async (c) => {
+  const db = c.env.DB
+  const id = c.req.param('id')
+  const body = await c.req.json()
+  const fields: string[] = []
+  const params: any[] = []
+  if ('name' in body && body.name) { fields.push('name=?'); params.push(body.name) }
+  if ('email' in body) { fields.push('email=?'); params.push(body.email || null) }
+  if ('pin' in body && body.pin) { fields.push('pin=?'); params.push(body.pin) }
+  if ('active' in body) { fields.push('active=?'); params.push(body.active) }
+  if (fields.length === 0) return c.json({ error: 'No fields to update' }, 400)
+  params.push(id)
+  await db.prepare(`UPDATE admins SET ${fields.join(', ')} WHERE id=?`).bind(...params).run()
   return c.json({ success: true })
 })
 
@@ -562,7 +624,7 @@ function getHTML() {
   const state = {
     // Auth
     auth: null, // { token, role, id, name }
-    authOptions: { stables: [], vets: [] },
+    authOptions: { stables: [], vets: [], admins: [] },
     loginRole: 'vet',
     
     // Data
@@ -570,6 +632,7 @@ function getHTML() {
     owners: [],
     stables: [],
     vets: [],
+    admins: [],
     types: [],
     treatments: {},
     search: '',
@@ -700,10 +763,14 @@ function getHTML() {
     state.vets = await api.get('/api/vets');
   }
 
+  async function loadAdmins() {
+    state.admins = await api.get('/api/admins');
+  }
+
   async function initApp() {
     state.loading = true;
     render();
-    await Promise.all([loadGrid(), loadOwners(), loadStables(), loadVets()]);
+    await Promise.all([loadGrid(), loadOwners(), loadStables(), loadVets(), loadAdmins()]);
     render();
   }
 
@@ -769,6 +836,8 @@ function getHTML() {
 
   const isVet = () => state.auth?.role === 'vet';
   const isStable = () => state.auth?.role === 'stable';
+  const isAdmin = () => state.auth?.role === 'admin';
+  const canEdit = () => isVet() || isAdmin();
 
   // ==================== SCROLL POSITION ====================
   let savedScrollX = 0, savedScrollY = 0;
@@ -797,9 +866,10 @@ function getHTML() {
   function renderLoginScreen() {
     const stables = state.authOptions.stables || [];
     const vets = state.authOptions.vets || [];
-    const isVetTab = state.loginRole === 'vet';
+    const admins = state.authOptions.admins || [];
+    const lr = state.loginRole;
     
-    const options = isVetTab ? vets : stables;
+    const options = lr === 'vet' ? vets : lr === 'stable' ? stables : admins;
 
     return '<div class="min-h-screen bg-gradient-to-b from-pe-slate to-pe-darker flex items-center justify-center p-4">' +
       '<div class="login-card w-full max-w-sm">' +
@@ -813,17 +883,20 @@ function getHTML() {
         
         '<div class="bg-white rounded-2xl shadow-2xl p-6">' +
           '<div class="flex mb-6 bg-gray-100 rounded-xl p-1">' +
-            '<button onclick="switchLoginRole(&apos;vet&apos;)" class="flex-1 py-2.5 rounded-lg text-sm font-semibold transition-all ' + (isVetTab ? 'bg-pe-green text-white shadow' : 'text-gray-500') + '">' +
-              '<i class="fas fa-user-md mr-1.5"></i>Veterinarian' +
+            '<button onclick="switchLoginRole(&apos;vet&apos;)" class="flex-1 py-2.5 rounded-lg text-xs font-semibold transition-all ' + (lr==='vet' ? 'bg-pe-green text-white shadow' : 'text-gray-500') + '">' +
+              '<i class="fas fa-user-md mr-1"></i>Vet' +
             '</button>' +
-            '<button onclick="switchLoginRole(&apos;stable&apos;)" class="flex-1 py-2.5 rounded-lg text-sm font-semibold transition-all ' + (!isVetTab ? 'bg-pe-slate text-white shadow' : 'text-gray-500') + '">' +
-              '<i class="fas fa-horse mr-1.5"></i>Stable' +
+            '<button onclick="switchLoginRole(&apos;stable&apos;)" class="flex-1 py-2.5 rounded-lg text-xs font-semibold transition-all ' + (lr==='stable' ? 'bg-pe-slate text-white shadow' : 'text-gray-500') + '">' +
+              '<i class="fas fa-horse mr-1"></i>Stable' +
+            '</button>' +
+            '<button onclick="switchLoginRole(&apos;admin&apos;)" class="flex-1 py-2.5 rounded-lg text-xs font-semibold transition-all ' + (lr==='admin' ? 'bg-red-600 text-white shadow' : 'text-gray-500') + '">' +
+              '<i class="fas fa-shield-alt mr-1"></i>Admin' +
             '</button>' +
           '</div>' +
           
           '<div class="space-y-4">' +
             '<div>' +
-              '<label class="text-xs font-semibold text-gray-600 mb-1.5 block">' + (isVetTab ? 'Select Veterinarian' : 'Select Stable') + '</label>' +
+              '<label class="text-xs font-semibold text-gray-600 mb-1.5 block">' + (lr==='vet' ? 'Select Veterinarian' : lr==='stable' ? 'Select Stable' : 'Select Admin') + '</label>' +
               '<select id="loginSelect" class="w-full px-3 py-3 border-2 border-gray-200 rounded-xl text-sm focus:border-pe-green outline-none">' +
                 '<option value="">Choose...</option>' +
                 options.map(function(o) { return '<option value="' + o.id + '">' + escHTML(o.name) + '</option>'; }).join('') +
@@ -835,13 +908,13 @@ function getHTML() {
                 ' class="w-full px-3 py-3 border-2 border-gray-200 rounded-xl text-sm focus:border-pe-green outline-none text-center text-lg tracking-[0.5em]"' +
                 ' onkeydown="if(event.key===&apos;Enter&apos;)login()" />' +
             '</div>' +
-            '<button onclick="login()" class="w-full py-3.5 rounded-xl text-sm font-bold text-white transition-colors ' + (isVetTab ? 'bg-pe-green hover:bg-pe-green-dark' : 'bg-pe-slate hover:bg-pe-dark') + '">' +
+            '<button onclick="login()" class="w-full py-3.5 rounded-xl text-sm font-bold text-white transition-colors ' + (lr==='vet' ? 'bg-pe-green hover:bg-pe-green-dark' : lr==='admin' ? 'bg-red-600 hover:bg-red-700' : 'bg-pe-slate hover:bg-pe-dark') + '">' +
               '<i class="fas fa-sign-in-alt mr-1.5"></i>Sign In' +
             '</button>' +
           '</div>' +
         '</div>' +
         
-        '<p class="text-center text-gray-500 text-[10px] mt-6">Default PIN: 1234</p>' +
+        '<p class="text-center text-gray-500 text-[10px] mt-6">Default PIN: 1234 (Vet/Stable) &middot; 0000 (Admin)</p>' +
       '</div>' +
     '</div>';
   }
@@ -853,8 +926,9 @@ function getHTML() {
 
   // ==================== HEADER ====================
   function renderHeader() {
-    const roleLabel = isVet() ? '<i class="fas fa-user-md mr-1"></i>' + escHTML(state.auth.name) : '<i class="fas fa-horse mr-1"></i>' + escHTML(state.auth.name);
-    const roleBadge = isVet() ? 'bg-pe-green' : 'bg-pe-accent';
+    const roleIcon = isVet() ? 'fa-user-md' : isAdmin() ? 'fa-shield-alt' : 'fa-horse';
+    const roleLabel = '<i class="fas ' + roleIcon + ' mr-1"></i>' + escHTML(state.auth.name);
+    const roleBadge = isVet() ? 'bg-pe-green' : isAdmin() ? 'bg-red-600' : 'bg-pe-accent';
     
     return '<header class="app-header bg-pe-slate text-white shadow-lg z-50">' +
       '<div class="flex items-center justify-between px-3 py-2">' +
@@ -869,7 +943,7 @@ function getHTML() {
         '</div>' +
         '<div class="flex items-center gap-1">' +
           '<span class="' + roleBadge + ' text-white text-[10px] px-2 py-1 rounded-full font-medium hidden sm:inline-flex items-center gap-1">' + roleLabel + '</span>' +
-          (isVet() ? '<button onclick="openAddHorseModal()" class="bg-pe-green hover:bg-pe-green-dark text-white px-3 py-2 rounded-lg text-xs font-semibold flex items-center gap-1.5 transition-colors"><i class="fas fa-plus"></i><span class="hidden sm:inline">Add Horse</span></button>' : '') +
+          (canEdit() ? '<button onclick="openAddHorseModal()" class="bg-pe-green hover:bg-pe-green-dark text-white px-3 py-2 rounded-lg text-xs font-semibold flex items-center gap-1.5 transition-colors"><i class="fas fa-plus"></i><span class="hidden sm:inline">Add Horse</span></button>' : '') +
           '<button onclick="openSettingsModal()" class="p-2 hover:bg-pe-dark rounded-lg transition-colors"><i class="fas fa-cog text-sm"></i></button>' +
           '<button onclick="logout()" class="p-2 hover:bg-pe-dark rounded-lg transition-colors" title="Sign Out"><i class="fas fa-sign-out-alt text-sm"></i></button>' +
         '</div>' +
@@ -905,8 +979,8 @@ function getHTML() {
       '</div>' +
       '<div class="flex items-center gap-2 px-3 pb-2">';
 
-    // Stable filter (only for vets)
-    if (isVet()) {
+    // Stable filter (for vets and admins)
+    if (canEdit()) {
       html += '<select onchange="setStableFilter(this.value)" class="text-xs bg-gray-100 border-0 rounded-lg px-2.5 py-1.5 font-medium text-gray-700 outline-none focus:ring-2 focus:ring-pe-green min-h-[32px]">' +
         '<option value=""' + (!state.stableFilter ? ' selected' : '') + '>All Stables</option>' +
         state.stables.map(function(s) { return '<option value="' + s.id + '"' + (state.stableFilter == s.id ? ' selected' : '') + '>' + escHTML(s.name) + '</option>'; }).join('') +
@@ -921,7 +995,7 @@ function getHTML() {
       '<option value="owner"' + (state.sort === 'owner' ? ' selected' : '') + '>Sort: Owner</option>' +
       '<option value="name"' + (state.sort === 'name' ? ' selected' : '') + '>Sort: Name</option>' +
       '<option value="barn_name"' + (state.sort === 'barn_name' ? ' selected' : '') + '>Sort: Barn Name</option>' +
-      (isVet() ? '<option value="stable"' + (state.sort === 'stable' ? ' selected' : '') + '>Sort: Stable</option>' : '') +
+      (canEdit() ? '<option value="stable"' + (state.sort === 'stable' ? ' selected' : '') + '>Sort: Stable</option>' : '') +
     '</select>' +
     '<span class="text-[10px] text-gray-400 ml-auto">' + state.horses.length + ' horses</span>' +
     '</div></div>';
@@ -972,7 +1046,7 @@ function getHTML() {
         const display = formatDate(dateStr);
         const cls = dateStr ? dateClass(dateStr) : 'text-gray-300';
         const hasNotes = treat && treat.notes;
-        if (isVet()) {
+        if (canEdit()) {
           return '<td class="date-cell px-1 py-2 text-center border-r border-gray-100 relative" onclick="openDatePicker(' + horse.id + ', ' + t.id + ', &apos;' + (dateStr || '') + '&apos;, &apos;' + ((treat?.notes || '').replace(/'/g, '')) + '&apos;)"><div class="text-[11px] ' + cls + '">' + (display || '&mdash;') + '</div>' + (hasNotes ? '<div class="absolute top-0.5 right-0.5 w-1.5 h-1.5 bg-pe-green rounded-full"></div>' : '') + '</td>';
         } else {
           return '<td class="px-1 py-2 text-center border-r border-gray-100 relative"><div class="text-[11px] ' + cls + '">' + (display || '&mdash;') + '</div>' + (hasNotes ? '<div class="absolute top-0.5 right-0.5 w-1.5 h-1.5 bg-pe-green rounded-full"></div>' : '') + '</td>';
@@ -994,6 +1068,8 @@ function getHTML() {
       editOwner: renderEditOwnerModal,
       editStable: renderEditStableModal,
       editVet: renderEditVetModal,
+      editAdmin: renderEditAdminModal,
+      changePin: renderChangePinModal,
       settings: renderSettingsModal,
     };
     return (m[state.modal] || function(){return '';})();
@@ -1114,6 +1190,35 @@ function getHTML() {
     );
   }
 
+  // ---- Edit Admin ----
+  function renderEditAdminModal() {
+    const d = state.modalData;
+    if (!d) return '';
+    return modalWrap(
+      modalHeader('Edit Administrator') +
+      '<div class="space-y-3">' +
+        '<div><label class="text-xs font-semibold text-gray-600 mb-1 block">Name *</label><input type="text" id="editAdminName" value="' + escHTML(d.name) + '" class="w-full px-3 py-2.5 border-2 border-gray-200 rounded-xl text-sm focus:border-pe-green outline-none" /></div>' +
+        '<div><label class="text-xs font-semibold text-gray-600 mb-1 block">Email</label><input type="email" id="editAdminEmail" value="' + escHTML(d.email||'') + '" placeholder="admin@example.com" class="w-full px-3 py-2.5 border-2 border-gray-200 rounded-xl text-sm focus:border-pe-green outline-none" /></div>' +
+        '<div><label class="text-xs font-semibold text-gray-600 mb-1 block">Login PIN</label><input type="text" id="editAdminPin" value="' + escHTML(d.pin||'') + '" placeholder="4-digit PIN" maxlength="10" class="w-full px-3 py-2.5 border-2 border-gray-200 rounded-xl text-sm focus:border-pe-green outline-none" /></div>' +
+        '<button onclick="saveEditAdmin()" class="w-full bg-pe-green text-white py-3 rounded-xl text-sm font-bold hover:bg-pe-green-dark transition-colors"><i class="fas fa-save mr-1"></i>Save Changes</button>' +
+      '</div>'
+    );
+  }
+
+  // ---- Change PIN ----
+  function renderChangePinModal() {
+    return modalWrap(
+      modalHeader('Change Your PIN') +
+      '<div class="space-y-3">' +
+        '<div class="bg-pe-light rounded-lg p-3 text-center"><div class="text-sm font-semibold text-pe-darker"><i class="fas ' + (isVet()?'fa-user-md':isAdmin()?'fa-shield-alt':'fa-horse') + ' mr-1.5"></i>' + escHTML(state.auth.name) + '</div><div class="text-[10px] text-gray-500 capitalize">' + state.auth.role + '</div></div>' +
+        '<div><label class="text-xs font-semibold text-gray-600 mb-1 block">Current PIN</label><input type="password" id="currentPin" placeholder="Enter current PIN" maxlength="10" inputmode="numeric" class="w-full px-3 py-2.5 border-2 border-gray-200 rounded-xl text-sm focus:border-pe-green outline-none text-center text-lg tracking-[0.3em]" /></div>' +
+        '<div><label class="text-xs font-semibold text-gray-600 mb-1 block">New PIN</label><input type="password" id="newPin" placeholder="Enter new PIN (min 4 chars)" maxlength="10" inputmode="numeric" class="w-full px-3 py-2.5 border-2 border-gray-200 rounded-xl text-sm focus:border-pe-green outline-none text-center text-lg tracking-[0.3em]" /></div>' +
+        '<div><label class="text-xs font-semibold text-gray-600 mb-1 block">Confirm New PIN</label><input type="password" id="confirmPin" placeholder="Confirm new PIN" maxlength="10" inputmode="numeric" class="w-full px-3 py-2.5 border-2 border-gray-200 rounded-xl text-sm focus:border-pe-green outline-none text-center text-lg tracking-[0.3em]" onkeydown="if(event.key===&apos;Enter&apos;)saveChangePin()" /></div>' +
+        '<button onclick="saveChangePin()" class="w-full bg-pe-slate text-white py-3 rounded-xl text-sm font-bold hover:bg-pe-dark transition-colors mt-1"><i class="fas fa-key mr-1"></i>Update PIN</button>' +
+      '</div>'
+    );
+  }
+
   // ---- Horse Detail ----
   function renderHorseDetailModal() {
     const horse = state.selectedHorse;
@@ -1133,7 +1238,7 @@ function getHTML() {
           '<div class="text-xs text-gray-400 mt-0.5"><i class="fas fa-user-circle mr-1"></i>' + escHTML(horse.owner_name) + (horse.stable_name ? ' <span class="text-pe-accent">(' + escHTML(horse.stable_name) + ')</span>' : '') + '</div>' +
           (horse.vet_name ? '<div class="text-xs text-gray-400"><i class="fas fa-user-md mr-1"></i>' + escHTML(horse.vet_name) + '</div>' : '') +
         '</div><div class="flex items-center gap-1">' +
-          (isVet() ? '<button onclick="openEditHorseModal(' + horse.id + ')" class="p-2 hover:bg-gray-100 rounded-full text-pe-accent" title="Edit Horse"><i class="fas fa-pen text-sm"></i></button>' : '') +
+          (canEdit() ? '<button onclick="openEditHorseModal(' + horse.id + ')" class="p-2 hover:bg-gray-100 rounded-full text-pe-accent" title="Edit Horse"><i class="fas fa-pen text-sm"></i></button>' : '') +
           '<button onclick="closeModal()" class="p-2 hover:bg-gray-100 rounded-full"><i class="fas fa-times text-gray-400"></i></button>' +
         '</div></div>';
 
@@ -1156,7 +1261,7 @@ function getHTML() {
         const dateStr = t ? t.treatment_date : null;
         const display = formatDate(dateStr);
         const cls = dateStr ? dateClass(dateStr) : 'text-gray-400';
-        const clickable = isVet();
+        const clickable = canEdit();
         html += '<div class="flex items-center justify-between px-3 py-2 rounded-lg ' + categoryBgLight(cat) + ' border' + (clickable ? ' cursor-pointer' : '') + '"' +
           (clickable ? ' onclick="openDatePicker(' + horse.id + ', ' + tt.id + ', &apos;' + (dateStr||'') + '&apos;, &apos;' + ((t?.notes||'').replace(/'/g,'')) + '&apos;)"' : '') + '>' +
           '<span class="text-xs font-medium text-gray-700">' + escHTML(tt.name) + '</span>' +
@@ -1174,23 +1279,14 @@ function getHTML() {
 
   // ---- Settings ----
   function renderSettingsModal() {
-    let html = modalWrap(
-      '<div class="flex items-center justify-between mb-4"><div class="font-bold text-pe-darker text-lg">Settings</div><button onclick="closeModal()" class="p-2 hover:bg-gray-100 rounded-full"><i class="fas fa-times text-gray-400"></i></button></div>' +
-      '<div class="space-y-4">'
-    );
-
-    // Stables section (vet only)
-    if (isVet()) {
-      html = html.replace('</div></div></div>', ''); // Remove closings to continue building
-      // We'll rebuild differently - let me just build the inner content
-    }
-
-    // Build inner content
     let inner = '<div class="flex items-center justify-between mb-4"><div class="font-bold text-pe-darker text-lg">Settings</div><button onclick="closeModal()" class="p-2 hover:bg-gray-100 rounded-full"><i class="fas fa-times text-gray-400"></i></button></div>';
     inner += '<div class="space-y-4">';
 
-    // Stables section (vet only)
-    if (isVet()) {
+    // Change PIN section (always visible for logged-in users)
+    inner += '<div class="bg-pe-light rounded-lg p-3"><div class="flex items-center justify-between"><div><div class="text-sm font-semibold text-pe-darker"><i class="fas ' + (isVet()?'fa-user-md':isAdmin()?'fa-shield-alt':'fa-horse') + ' mr-1.5"></i>' + escHTML(state.auth.name) + '</div><div class="text-[10px] text-gray-500 capitalize">' + state.auth.role + '</div></div><button onclick="openChangePinModal()" class="bg-pe-slate text-white px-3 py-2 rounded-lg text-xs font-semibold hover:bg-pe-dark transition-colors"><i class="fas fa-key mr-1"></i>Change PIN</button></div></div>';
+
+    // Stables section (vet or admin)
+    if (canEdit()) {
       inner += '<div><div class="text-xs font-bold text-gray-500 uppercase tracking-wider mb-2"><i class="fas fa-warehouse mr-1"></i>Stables</div><div class="space-y-1">';
       state.stables.forEach(function(s) {
         inner += '<div class="flex items-center justify-between px-3 py-2.5 bg-gray-50 rounded-lg cursor-pointer hover:bg-gray-100 active:bg-gray-200 transition-colors" onclick="openEditStableModal(' + s.id + ')">' +
@@ -1215,23 +1311,36 @@ function getHTML() {
       inner += '<div class="mt-2 flex gap-2"><input type="text" id="newVetInput" placeholder="New vet name" class="flex-1 px-3 py-2 border-2 border-gray-200 rounded-lg text-sm focus:border-pe-green outline-none" /><button onclick="addVetFromSettings()" class="bg-pe-green text-white px-4 py-2 rounded-lg text-sm font-semibold hover:bg-pe-green-dark">Add</button></div></div>';
     }
 
+    // Admins section (admin only)
+    if (isAdmin()) {
+      inner += '<div><div class="text-xs font-bold text-gray-500 uppercase tracking-wider mb-2"><i class="fas fa-shield-alt mr-1"></i>Administrators</div><div class="space-y-1">';
+      state.admins.forEach(function(a) {
+        inner += '<div class="flex items-center justify-between px-3 py-2.5 bg-gray-50 rounded-lg cursor-pointer hover:bg-gray-100 active:bg-gray-200 transition-colors" onclick="openEditAdminModal(' + a.id + ')">' +
+          '<div><div class="text-sm font-medium">' + escHTML(a.name) + '</div>' +
+          (a.email ? '<div class="text-[10px] text-gray-400">' + escHTML(a.email) + '</div>' : '') +
+          '</div><div class="flex items-center gap-2"><i class="fas fa-chevron-right text-gray-300 text-xs"></i></div></div>';
+      });
+      inner += '</div>';
+      inner += '<div class="mt-2 flex gap-2"><input type="text" id="newAdminInput" placeholder="New admin name" class="flex-1 px-3 py-2 border-2 border-gray-200 rounded-lg text-sm focus:border-pe-green outline-none" /><button onclick="addAdminFromSettings()" class="bg-pe-green text-white px-4 py-2 rounded-lg text-sm font-semibold hover:bg-pe-green-dark">Add</button></div></div>';
+    }
+
     // Owners section
     inner += '<div><div class="text-xs font-bold text-gray-500 uppercase tracking-wider mb-2"><i class="fas fa-user-circle mr-1"></i>Owners</div><div class="space-y-1">';
     state.owners.forEach(function(o) {
-      inner += '<div class="flex items-center justify-between px-3 py-2.5 bg-gray-50 rounded-lg' + (isVet() ? ' cursor-pointer hover:bg-gray-100 active:bg-gray-200' : '') + ' transition-colors"' + (isVet() ? ' onclick="openEditOwnerModal(' + o.id + ')"' : '') + '>' +
+      inner += '<div class="flex items-center justify-between px-3 py-2.5 bg-gray-50 rounded-lg' + (canEdit() ? ' cursor-pointer hover:bg-gray-100 active:bg-gray-200' : '') + ' transition-colors"' + (canEdit() ? ' onclick="openEditOwnerModal(' + o.id + ')"' : '') + '>' +
         '<div><div class="text-sm font-medium">' + escHTML(o.name) + '</div>' +
         (o.stable_name ? '<div class="text-[10px] text-pe-accent"><i class="fas fa-warehouse mr-0.5"></i>' + escHTML(o.stable_name) + '</div>' : '') +
         (o.contact ? '<div class="text-[10px] text-gray-400">' + escHTML(o.contact) + '</div>' : '') +
-        '</div><div class="flex items-center gap-2"><span class="text-[10px] text-gray-400">' + (o.horse_count||0) + ' horse' + ((o.horse_count||0)!==1?'s':'') + '</span>' + (isVet() ? '<i class="fas fa-chevron-right text-gray-300 text-xs"></i>' : '') + '</div></div>';
+        '</div><div class="flex items-center gap-2"><span class="text-[10px] text-gray-400">' + (o.horse_count||0) + ' horse' + ((o.horse_count||0)!==1?'s':'') + '</span>' + (canEdit() ? '<i class="fas fa-chevron-right text-gray-300 text-xs"></i>' : '') + '</div></div>';
     });
     inner += '</div>';
-    if (isVet()) {
+    if (canEdit()) {
       inner += '<div class="mt-2 flex gap-2"><input type="text" id="newOwnerInput" placeholder="New owner name" class="flex-1 px-3 py-2 border-2 border-gray-200 rounded-lg text-sm focus:border-pe-green outline-none" /><button onclick="addOwnerFromSettings()" class="bg-pe-green text-white px-4 py-2 rounded-lg text-sm font-semibold hover:bg-pe-green-dark">Add</button></div>';
     }
     inner += '</div>';
 
-    // Treatment types (vet only can add)
-    if (isVet()) {
+    // Treatment types (vet or admin can add)
+    if (canEdit()) {
       inner += '<div><div class="text-xs font-bold text-gray-500 uppercase tracking-wider mb-2"><i class="fas fa-syringe mr-1"></i>Treatment Types</div><div class="space-y-1">';
       state.types.forEach(function(t) {
         inner += '<div class="flex items-center justify-between px-3 py-1.5 rounded-lg" style="background:' + t.color + '10;border-left:3px solid ' + t.color + '"><span class="text-xs font-medium">' + escHTML(t.name) + '</span><span class="badge" style="background:' + t.color + ';color:white;">' + t.category + '</span></div>';
@@ -1475,6 +1584,55 @@ function getHTML() {
     showToast('Treatment type added!');
     await loadGrid();
     state.modal = 'settings'; render();
+  }
+
+  // Admins
+  function openEditAdminModal(id) {
+    const a = state.admins.find(function(x){return x.id===id;});
+    if (!a) return;
+    state.modal = 'editAdmin';
+    state.modalData = { id: a.id, name: a.name, email: a.email, pin: a.pin };
+    render();
+  }
+  async function saveEditAdmin() {
+    const d = state.modalData;
+    const name = document.getElementById('editAdminName').value.trim();
+    const email = document.getElementById('editAdminEmail').value.trim();
+    const pin = document.getElementById('editAdminPin').value.trim();
+    if (!name) { showToast('Name is required', 'error'); return; }
+    await api.put('/api/admins/' + d.id, { name: name, email: email, pin: pin || undefined });
+    showToast('Admin updated!');
+    await loadAdmins();
+    state.modal = 'settings'; state.modalData = null; render();
+  }
+  async function addAdminFromSettings() {
+    const name = document.getElementById('newAdminInput').value.trim();
+    if (!name) return;
+    const result = await api.post('/api/admins', { name: name });
+    if (result.error) { showToast(result.error, 'error'); return; }
+    showToast('Admin added!');
+    await loadAdmins();
+    await loadAuthOptions();
+    state.modal = 'settings'; render();
+  }
+
+  // Change PIN
+  function openChangePinModal() {
+    state.modal = 'changePin';
+    state.modalData = null;
+    render();
+  }
+  async function saveChangePin() {
+    const currentPin = document.getElementById('currentPin').value;
+    const newPin = document.getElementById('newPin').value;
+    const confirmPin = document.getElementById('confirmPin').value;
+    if (!currentPin) { showToast('Enter your current PIN', 'error'); return; }
+    if (!newPin || newPin.length < 4) { showToast('New PIN must be at least 4 characters', 'error'); return; }
+    if (newPin !== confirmPin) { showToast('New PINs do not match', 'error'); return; }
+    const result = await api.post('/api/auth/change-pin', { current_pin: currentPin, new_pin: newPin });
+    if (result.error) { showToast(result.error, 'error'); return; }
+    showToast('PIN changed successfully!');
+    state.modal = 'settings'; state.modalData = null; render();
   }
 
   // Settings

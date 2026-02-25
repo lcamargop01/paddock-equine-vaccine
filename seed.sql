@@ -1,3 +1,6 @@
+-- Seed admins
+INSERT OR IGNORE INTO admins (name, email, pin) VALUES ('Admin', 'admin@paddockequine.com', '0000');
+
 -- Seed stables
 INSERT OR IGNORE INTO stables (name, pin) VALUES ('Double H', '1234');
 
