@@ -837,7 +837,8 @@ function getHTML() {
   const isVet = () => state.auth?.role === 'vet';
   const isStable = () => state.auth?.role === 'stable';
   const isAdmin = () => state.auth?.role === 'admin';
-  const canEdit = () => isVet() || isAdmin();
+  const canEdit = () => isVet() || isAdmin() || isStable();
+  const isGlobalView = () => isVet() || isAdmin();
 
   // ==================== SCROLL POSITION ====================
   let savedScrollX = 0, savedScrollY = 0;
@@ -979,8 +980,8 @@ function getHTML() {
       '</div>' +
       '<div class="flex items-center gap-2 px-3 pb-2">';
 
-    // Stable filter (for vets and admins)
-    if (canEdit()) {
+    // Stable filter (for vets and admins only - stables already filtered to their own)
+    if (isGlobalView()) {
       html += '<select onchange="setStableFilter(this.value)" class="text-xs bg-gray-100 border-0 rounded-lg px-2.5 py-1.5 font-medium text-gray-700 outline-none focus:ring-2 focus:ring-pe-green min-h-[32px]">' +
         '<option value=""' + (!state.stableFilter ? ' selected' : '') + '>All Stables</option>' +
         state.stables.map(function(s) { return '<option value="' + s.id + '"' + (state.stableFilter == s.id ? ' selected' : '') + '>' + escHTML(s.name) + '</option>'; }).join('') +
@@ -995,7 +996,7 @@ function getHTML() {
       '<option value="owner"' + (state.sort === 'owner' ? ' selected' : '') + '>Sort: Owner</option>' +
       '<option value="name"' + (state.sort === 'name' ? ' selected' : '') + '>Sort: Name</option>' +
       '<option value="barn_name"' + (state.sort === 'barn_name' ? ' selected' : '') + '>Sort: Barn Name</option>' +
-      (canEdit() ? '<option value="stable"' + (state.sort === 'stable' ? ' selected' : '') + '>Sort: Stable</option>' : '') +
+      (isGlobalView() ? '<option value="stable"' + (state.sort === 'stable' ? ' selected' : '') + '>Sort: Stable</option>' : '') +
     '</select>' +
     '<span class="text-[10px] text-gray-400 ml-auto">' + state.horses.length + ' horses</span>' +
     '</div></div>';
@@ -1285,8 +1286,8 @@ function getHTML() {
     // Change PIN section (always visible for logged-in users)
     inner += '<div class="bg-pe-light rounded-lg p-3"><div class="flex items-center justify-between"><div><div class="text-sm font-semibold text-pe-darker"><i class="fas ' + (isVet()?'fa-user-md':isAdmin()?'fa-shield-alt':'fa-horse') + ' mr-1.5"></i>' + escHTML(state.auth.name) + '</div><div class="text-[10px] text-gray-500 capitalize">' + state.auth.role + '</div></div><button onclick="openChangePinModal()" class="bg-pe-slate text-white px-3 py-2 rounded-lg text-xs font-semibold hover:bg-pe-dark transition-colors"><i class="fas fa-key mr-1"></i>Change PIN</button></div></div>';
 
-    // Stables section (vet or admin)
-    if (canEdit()) {
+    // Stables section (vet or admin only)
+    if (isGlobalView()) {
       inner += '<div><div class="text-xs font-bold text-gray-500 uppercase tracking-wider mb-2"><i class="fas fa-warehouse mr-1"></i>Stables</div><div class="space-y-1">';
       state.stables.forEach(function(s) {
         inner += '<div class="flex items-center justify-between px-3 py-2.5 bg-gray-50 rounded-lg cursor-pointer hover:bg-gray-100 active:bg-gray-200 transition-colors" onclick="openEditStableModal(' + s.id + ')">' +
@@ -1298,7 +1299,7 @@ function getHTML() {
       inner += '</div>';
       inner += '<div class="mt-2 flex gap-2"><input type="text" id="newStableInput" placeholder="New stable name" class="flex-1 px-3 py-2 border-2 border-gray-200 rounded-lg text-sm focus:border-pe-green outline-none" /><button onclick="addStableFromSettings()" class="bg-pe-green text-white px-4 py-2 rounded-lg text-sm font-semibold hover:bg-pe-green-dark">Add</button></div></div>';
 
-      // Vets section
+      // Vets section (vet or admin only)
       inner += '<div><div class="text-xs font-bold text-gray-500 uppercase tracking-wider mb-2"><i class="fas fa-user-md mr-1"></i>Veterinarians</div><div class="space-y-1">';
       state.vets.forEach(function(v) {
         inner += '<div class="flex items-center justify-between px-3 py-2.5 bg-gray-50 rounded-lg cursor-pointer hover:bg-gray-100 active:bg-gray-200 transition-colors" onclick="openEditVetModal(' + v.id + ')">' +
@@ -1339,8 +1340,8 @@ function getHTML() {
     }
     inner += '</div>';
 
-    // Treatment types (vet or admin can add)
-    if (canEdit()) {
+    // Treatment types (vet or admin only)
+    if (isGlobalView()) {
       inner += '<div><div class="text-xs font-bold text-gray-500 uppercase tracking-wider mb-2"><i class="fas fa-syringe mr-1"></i>Treatment Types</div><div class="space-y-1">';
       state.types.forEach(function(t) {
         inner += '<div class="flex items-center justify-between px-3 py-1.5 rounded-lg" style="background:' + t.color + '10;border-left:3px solid ' + t.color + '"><span class="text-xs font-medium">' + escHTML(t.name) + '</span><span class="badge" style="background:' + t.color + ';color:white;">' + t.category + '</span></div>';
