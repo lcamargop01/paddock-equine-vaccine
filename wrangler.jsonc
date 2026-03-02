@@ -1,6 +1,6 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "webapp",
+  "name": "paddock-equine",
   "compatibility_date": "2026-02-24",
   "pages_build_output_dir": "./dist",
   "compatibility_flags": [
@@ -10,7 +10,7 @@
     {
       "binding": "DB",
       "database_name": "paddock-equine-db",
-      "database_id": "local-dev-id"
+      "database_id": "b400bab3-1f35-4edb-8c11-484df040dd48"
     }
   ]
 }
