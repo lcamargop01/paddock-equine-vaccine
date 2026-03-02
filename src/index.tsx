@@ -915,7 +915,7 @@ function getHTML() {
           '</div>' +
         '</div>' +
         
-        '<p class="text-center text-gray-500 text-[10px] mt-6">Default PIN: 1234 (Vet/Stable) &middot; 0000 (Admin)</p>' +
+        '' +
       '</div>' +
     '</div>';
   }
